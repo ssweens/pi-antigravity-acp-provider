@@ -32,7 +32,7 @@ function tokenPathWith(content: string | undefined): string {
 /** A relocated store home (`GEMINI_HOME` or `HOME`) with the server's token. */
 function homeWithToken(): string {
 	const home = temporaryRoot();
-	const directory = path.join(home, "antigravity-acp");
+	const directory = path.join(home, "antigravity-cli");
 	fs.mkdirSync(directory, { recursive: true });
 	fs.writeFileSync(path.join(directory, "acp_token.json"), refreshable);
 	return home;
@@ -173,7 +173,7 @@ describe("child environment resolution", () => {
 	it("resolves the child's default store from the child HOME", () => {
 		vi.stubEnv("HOME", temporaryRoot());
 		const childHome = temporaryRoot();
-		const store = path.join(childHome, ".gemini", "antigravity-acp");
+		const store = path.join(childHome, ".gemini", "antigravity-cli");
 		fs.mkdirSync(store, { recursive: true });
 		fs.writeFileSync(path.join(store, "acp_token.json"), refreshable);
 		const decision = resolveCredentialStorageDecision({

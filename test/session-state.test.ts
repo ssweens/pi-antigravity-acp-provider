@@ -152,6 +152,63 @@ describe("ACP session compatibility", () => {
 		expect(splitSessionModelId(state, "gemini-a-off")).toBeUndefined();
 	});
 
+	it("preserves per-family tiers (xhigh, fixed orchestrators, non-Gemini families) from agy acp", () => {
+		const state = decodeSessionState({
+			configOptions: [
+				{
+					id: "model",
+					name: "Model",
+					category: "model",
+					type: "select",
+					currentValue: "gemini-3.8-flash",
+					options: [
+						{ value: "gemini-4-neon", name: "Gemini 4 Neon" },
+						{ value: "gemini-3.8-flash", name: "Gemini 3.8 Flash" },
+						{ value: "gemini-pro-orchestrator", name: "Orchestrator (Carbon)" },
+						{ value: "claude-opus-5-5", name: "Claude Opus 5.5" },
+					],
+				},
+				{
+					id: "thought_level",
+					name: "Thinking Level",
+					category: "thought_level",
+					type: "select",
+					currentValue: "high",
+					options: [
+						{ value: "low", name: "Low" },
+						{ value: "medium", name: "Medium" },
+						{ value: "high", name: "High" },
+					],
+				},
+			],
+			models: {
+				currentModelId: "gemini-3.8-flash-high",
+				availableModels: [
+					{ modelId: "gemini-4-neon-low", name: "Gemini 4 Neon (Low)" },
+					{ modelId: "gemini-4-neon-medium", name: "Gemini 4 Neon (Medium)" },
+					{ modelId: "gemini-4-neon-high", name: "Gemini 4 Neon (High)" },
+					{ modelId: "gemini-4-neon-xhigh", name: "Gemini 4 Neon (XHigh)" },
+					{ modelId: "gemini-3.8-flash-low", name: "Gemini 3.8 Flash (Low)" },
+					{ modelId: "gemini-3.8-flash-medium", name: "Gemini 3.8 Flash (Medium)" },
+					{ modelId: "gemini-3.8-flash-high", name: "Gemini 3.8 Flash (High)" },
+					{ modelId: "gemini-pro-orchestrator", name: "Orchestrator (Carbon)" },
+					{ modelId: "claude-opus-5-5-low", name: "Claude Opus 5.5 (Low)" },
+					{ modelId: "claude-opus-5-5-high", name: "Claude Opus 5.5 (High)" },
+				],
+			},
+		});
+		const discovered = sessionModels(state);
+		expect(discovered?.currentModelId).toBe("gemini-3.8-flash-high");
+		expect(discovered?.availableModels.map((m) => m.modelId)).toContain("gemini-4-neon-xhigh");
+		expect(discovered?.availableModels.map((m) => m.modelId)).toContain("gemini-pro-orchestrator");
+		expect(discovered?.availableModels.map((m) => m.modelId)).not.toContain("gemini-pro-orchestrator-high");
+		// Switching from flash (3 tiers) to neon-xhigh (4 tiers) must still split cleanly.
+		expect(splitSessionModelId(state, "gemini-4-neon-xhigh")).toEqual({
+			base: "gemini-4-neon",
+			effort: "xhigh",
+		});
+	});
+
 	it.each([
 		null,
 		{ models: { currentModelId: "bad", availableModels: [{ modelId: 123, name: "Bad" }] } },

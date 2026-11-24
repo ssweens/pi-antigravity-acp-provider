@@ -64,7 +64,22 @@ describe("resolveNodeBinary", () => {
 		const nodejs = "/nix/store/example-nodejs/bin/nodejs";
 		try {
 			Object.defineProperty(process, "execPath", { value: nodejs, configurable: true });
-			expect(resolveNodeBinary(undefined, { PATH: "" })).toBe(nodejs);
+			expect(resolveNodeBinary(undefined, { PATH: "" }, (file) => file === nodejs)).toBe(nodejs);
+		} finally {
+			Object.defineProperty(process, "execPath", { value: original, configurable: true });
+		}
+	});
+
+	it("falls back to PATH when process.execPath points to a removed Node binary (e.g. Homebrew upgrade)", () => {
+		const original = process.execPath;
+		const binDir = path.resolve("homebrew-bin");
+		const currentNode = path.join(binDir, process.platform === "win32" ? "node.exe" : "node");
+		try {
+			Object.defineProperty(process, "execPath", {
+				value: "/opt/homebrew/Cellar/node/26.5.1/bin/node",
+				configurable: true,
+			});
+			expect(resolveNodeBinary(undefined, { PATH: binDir }, (file) => file === currentNode)).toBe(currentNode);
 		} finally {
 			Object.defineProperty(process, "execPath", { value: original, configurable: true });
 		}
@@ -276,7 +291,7 @@ describe("applyDefaultTlsEnvironment", () => {
 		// The child can run with a store the launching process never sees; the
 		// decision must follow the environment the child actually receives.
 		const childHome = await fs.mkdtemp(path.join(os.tmpdir(), "antigravity-child-home-"));
-		const acpDirectory = path.join(childHome, "antigravity-acp");
+		const acpDirectory = path.join(childHome, "antigravity-cli");
 		await fs.mkdir(acpDirectory, { recursive: true });
 		await fs.writeFile(path.join(acpDirectory, "acp_token.json"), '{"refresh_token":"fixture"}');
 		const parentHome = await fs.mkdtemp(path.join(os.tmpdir(), "antigravity-parent-home-"));

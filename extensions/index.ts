@@ -238,14 +238,18 @@ export function registerAntigravityAcp(pi: ExtensionAPI, connectionFactory?: Ant
 			const snapshot = await runtime.snapshot(verbose);
 			const auth = inspectAntigravityAuth();
 			const setup = inspectRuntimeSetup();
-			const update = await checkAntigravityAcpUpdate().catch(() => undefined);
+			const update = setup.launch?.kind === "agy-cli"
+				? undefined
+				: await checkAntigravityAcpUpdate().catch(() => undefined);
 			ctx.ui.notify(
 				[
 					`Antigravity ACP provider ${PACKAGE_VERSION}`,
-					`Runtime: installed=${setup.installedVersion ?? "external/unknown"} approved=${update?.approvedVersion ?? setup.approvedVersion} registry=${update?.latestVersion ?? "unavailable"} updates=${setup.updateMode}; ACP SDK ${ACP_SDK_VERSION}, protocol ${ACP_PROTOCOL_VERSION}`,
+					setup.launch?.kind === "agy-cli"
+						? `Runtime: agy CLI ${setup.installedVersion ?? "unknown"}; ACP SDK ${ACP_SDK_VERSION}, protocol ${ACP_PROTOCOL_VERSION}`
+						: `Runtime: installed=${setup.installedVersion ?? "external/unknown"} approved=${update?.approvedVersion ?? setup.approvedVersion} registry=${update?.latestVersion ?? "unavailable"} updates=${setup.updateMode}; ACP SDK ${ACP_SDK_VERSION}, protocol ${ACP_PROTOCOL_VERSION}`,
 					`Antigravity server: ${entry}`,
-					`Authentication: ${auth.status}${auth.authType ? ` (${auth.authType})` : ""}`,
-					`Credential storage (preflight): ${describeCredentialStorage()}`,
+					`Authentication: ${auth.status}${auth.authType ? ` (${auth.authType})` : ""}${auth.credentialStore ? ` [${auth.credentialStore}]` : ""}`,
+					...(setup.launch?.kind === "agy-cli" ? [] : [`Credential storage (preflight): ${describeCredentialStorage()}`]),
 					`Requested permission mode: ${permissionModeLabel(snapshot.permissionMode)}`,
 					`Tool activity mode: ${snapshot.toolActivityMode}`,
 					`Active bindings: ${snapshot.bindings}`,
@@ -268,6 +272,7 @@ export function registerAntigravityAcp(pi: ExtensionAPI, connectionFactory?: Ant
 
 	pi.on("session_start", async (_event, ctx) => {
 		if (loadConfig().runtimeUpdates !== "notify") return;
+		if (inspectRuntimeSetup().launch?.kind === "agy-cli") return;
 		try {
 			const update = await checkAntigravityAcpUpdate();
 			if (update.approvalPending) {

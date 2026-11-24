@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 import { Open, type File as ZipFile } from "unzipper";
 
 import { loadConfig, type RuntimeUpdateMode } from "../config.js";
-import { resolveAntigravityAcpDirectory, resolveAntigravityAcpLaunch, type AntigravityLaunch } from "./antigravity.js";
+import { readAgyCliVersion, resolveAntigravityAcpDirectory, resolveAntigravityAcpLaunch, type AntigravityLaunch } from "./antigravity.js";
 import { AntigravityAcpConnection } from "./connection.js";
 import { AntigravityAcpError } from "./errors.js";
 import {
@@ -101,14 +101,25 @@ export function inspectRuntimeSetup(): RuntimeSetupStatus {
 		// Not installed.
 	}
 	const key = platformKey();
-	const installedVersion = launch?.source === "managed" ? readInstallRecord(path.dirname(launch.command))?.version : undefined;
-	const approvedVersion = latestManifestRelease(readCachedManifest()?.manifest ?? readBundledRuntimeManifest()).version;
+	const installedVersion =
+		launch?.kind === "agy-cli"
+			? readAgyCliVersion(launch.command)
+			: launch?.source === "managed"
+				? readInstallRecord(path.dirname(launch.command))?.version
+				: undefined;
+	const approvedVersion =
+		launch?.kind === "agy-cli"
+			? (installedVersion ?? "agy-cli")
+			: latestManifestRelease(readCachedManifest()?.manifest ?? readBundledRuntimeManifest()).version;
 	return {
 		installed: launch !== undefined,
 		...(launch ? { launch } : {}),
 		...(installedVersion ? { installedVersion } : {}),
 		approvedVersion,
-		updateAvailable: installedVersion !== undefined && compareRuntimeVersions(installedVersion, approvedVersion) < 0,
+		updateAvailable:
+			launch?.kind !== "agy-cli" &&
+			installedVersion !== undefined &&
+			compareRuntimeVersions(installedVersion, approvedVersion) < 0,
 		updateMode: loadConfig().runtimeUpdates,
 		platform: key,
 		musl: isMuslLinux(),
@@ -123,14 +134,26 @@ export function ensureAntigravityAcpReady(onProgress?: (message: string) => void
 }
 
 export async function checkAntigravityAcpUpdate(force = false): Promise<RuntimeUpdateStatus> {
-	const key = platformKey();
-	const { release, officialVersion } = await resolveLatestRelease(key, force);
 	let launch: AntigravityLaunch | undefined;
 	try {
 		launch = resolveAntigravityAcpLaunch();
 	} catch {
-		// Missing runtimes are install candidates.
+		// Not installed.
 	}
+	if (launch?.kind === "agy-cli") {
+		const version = readAgyCliVersion(launch.command) ?? "unknown";
+		return {
+			installedVersion: version,
+			latestVersion: version,
+			approvedVersion: version,
+			updateAvailable: false,
+			approvalPending: false,
+			managed: false,
+			launch,
+		};
+	}
+	const key = platformKey();
+	const { release, officialVersion } = await resolveLatestRelease(key, force);
 	const installedVersion = launch?.source === "managed" ? readInstallRecord(path.dirname(launch.command))?.version : undefined;
 	return {
 		...(installedVersion ? { installedVersion } : {}),
@@ -146,9 +169,15 @@ export async function checkAntigravityAcpUpdate(force = false): Promise<RuntimeU
 export async function updateAntigravityAcpRuntime(
 	onProgress?: (message: string) => void,
 ): Promise<{ version: string; changed: boolean; binary: string }> {
-	configureDefaultAuth();
 	const selected = inspectRuntimeSetup().launch;
-	if (selected && selected.source !== "managed") {
+	if (!selected || selected.kind === "agy-cli") {
+		throw new AntigravityAcpError(
+			"spawn",
+			"Antigravity CLI (agy) manages its own updates. Run `agy update` in your terminal.",
+		);
+	}
+	configureDefaultAuth();
+	if (selected.source !== "managed") {
 		throw new AntigravityAcpError(
 			"spawn",
 			"The selected Antigravity ACP runtime is externally managed. Update it with its own installer; no managed runtime was installed.",
@@ -164,31 +193,10 @@ export async function updateAntigravityAcpRuntime(
 	return installRuntime(release, onProgress);
 }
 
-async function ensureOnce(onProgress?: (message: string) => void): Promise<void> {
-	configureDefaultAuth();
-	let launch: AntigravityLaunch | undefined;
-	try {
-		launch = resolveAntigravityAcpLaunch();
-	} catch {
-		// Install the latest signed release below.
-	}
-
-	if (launch && launch.source !== "managed") return;
-	if (launch) repairRuntimeExecutablePermissions(path.dirname(launch.command));
-	if (launch && loadConfig().runtimeUpdates !== "automatic") return;
-
-	let resolved: Awaited<ReturnType<typeof resolveLatestRelease>>;
-	try {
-		resolved = await resolveLatestRelease(platformKey(), false);
-	} catch (error) {
-		// Registry or manifest outages must not disable a working managed runtime.
-		if (launch) return;
-		throw error;
-	}
-	const { release } = resolved;
-	const installedVersion = launch ? readInstallRecord(path.dirname(launch.command))?.version : undefined;
-	if (installedVersion && compareRuntimeVersions(installedVersion, release.version) >= 0) return;
-	await installRuntime(release, onProgress);
+async function ensureOnce(_onProgress?: (message: string) => void): Promise<void> {
+	// Require an installed `agy` CLI (or explicit AGY_ACP_BIN); never auto-download
+	// legacy `agy_acp_server.par` releases.
+	resolveAntigravityAcpLaunch();
 }
 
 async function resolveLatestRelease(

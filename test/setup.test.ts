@@ -29,7 +29,7 @@ describe("external runtime ownership", () => {
 		vi.stubEnv("AGY_ACP_BIN", binary);
 		const fetchMock = vi.fn();
 		vi.stubGlobal("fetch", fetchMock);
-		await expect(updateAntigravityAcpRuntime()).rejects.toThrow("externally managed");
+		await expect(updateAntigravityAcpRuntime()).rejects.toThrow("agy update");
 		expect(fetchMock).not.toHaveBeenCalled();
 		expect(fs.readFileSync(binary, "utf8")).toBe("external");
 	});
@@ -169,35 +169,15 @@ describe("managed runtime executable permissions", () => {
 	});
 });
 
-describe("default auth profile", () => {
-	it("seeds the scoped profile under GEMINI_HOME and leaves the default profile alone", async () => {
+describe("agy CLI preflight", () => {
+	it("succeeds without writing settings.json when agy binary is present", async () => {
 		const scopedHome = temporaryDirectory();
-		const defaultSettings = path.join(os.homedir(), ".gemini", "antigravity-acp", "settings.json");
-		const before = fs.existsSync(defaultSettings) ? fs.readFileSync(defaultSettings, "utf8") : undefined;
-		const binary = path.join(temporaryDirectory(), "external-agent");
-		fs.writeFileSync(binary, "external", { mode: 0o755 });
+		const binary = path.join(temporaryDirectory(), "agy");
+		fs.writeFileSync(binary, "binary", { mode: 0o755 });
 		vi.stubEnv("AGY_ACP_BIN", binary);
 		vi.stubEnv("GEMINI_HOME", scopedHome);
-		vi.stubEnv("GEMINI_API_KEY", "");
 		await ensureAntigravityAcpReady();
-		expect(JSON.parse(fs.readFileSync(path.join(scopedHome, "antigravity-acp", "settings.json"), "utf8"))).toMatchObject({
-			auth: { type: "oauth-personal" },
-		});
-		const after = fs.existsSync(defaultSettings) ? fs.readFileSync(defaultSettings, "utf8") : undefined;
-		expect(after).toBe(before);
-	});
-
-	it("records an API key in the scoped profile", async () => {
-		const scopedHome = temporaryDirectory();
-		const binary = path.join(temporaryDirectory(), "external-agent");
-		fs.writeFileSync(binary, "external", { mode: 0o755 });
-		vi.stubEnv("AGY_ACP_BIN", binary);
-		vi.stubEnv("GEMINI_HOME", scopedHome);
-		vi.stubEnv("GEMINI_API_KEY", "scoped-key");
-		await ensureAntigravityAcpReady();
-		expect(JSON.parse(fs.readFileSync(path.join(scopedHome, "antigravity-acp", "settings.json"), "utf8"))).toMatchObject({
-			auth: { type: "gemini-api-key" },
-		});
+		expect(fs.existsSync(path.join(scopedHome, "antigravity-cli", "settings.json"))).toBe(false);
 	});
 });
 

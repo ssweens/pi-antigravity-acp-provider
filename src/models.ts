@@ -65,6 +65,7 @@ export const FALLBACK_MODELS: readonly Model<typeof API_ID>[] = [
 		low: "gemini-4-neon-low",
 		medium: "gemini-4-neon-medium",
 		high: "gemini-4-neon-high",
+		xhigh: "gemini-4-neon-xhigh",
 	}),
 	reasoningModel("gemini-4-carbon", "Gemini 4 Carbon", {
 		low: "gemini-4-carbon-low",
@@ -100,7 +101,7 @@ export function projectModels(models: readonly AcpModelInfo[]): Model<typeof API
 	for (const candidate of safe) {
 		const id = candidate.modelId.trim();
 		const parsed = effortFromName(candidate.name) ?? effortFromId(id);
-		if (!id.startsWith("gemini-") || !parsed) continue;
+		if (!parsed) continue;
 		const key = parsed.baseName.toLowerCase();
 		const group = groups.get(key) ?? { name: parsed.baseName, variants: {}, members: [] };
 		group.variants[parsed.effort] = id;
@@ -273,7 +274,7 @@ function baseModel(
 	};
 }
 
-function effortFromName(name: string): { baseName: string; effort: Effort } | undefined {
+export function effortFromName(name: string): { baseName: string; effort: Effort } | undefined {
 	const match = name.trim().match(/^(.+?)\s*\((low|medium|high|xhigh)\)$/iu);
 	if (!match?.[1] || !match[2]) return undefined;
 	return { baseName: match[1].trim(), effort: match[2].toLowerCase() as Effort };

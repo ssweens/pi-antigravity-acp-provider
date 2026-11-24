@@ -887,7 +887,7 @@ describe("live quota", () => {
 describe("throwaway conversations", () => {
 	const userSid = "0f8fad5b-d9cb-469f-a165-70867728950e";
 	function conversationsIn(root: string, sids: "uuid" | "plain" = "uuid") {
-		const acp = path.join(root, "gemini", "antigravity-acp");
+		const acp = path.join(root, "gemini", "antigravity-cli");
 		const conversations = path.join(acp, "conversations");
 		fs.mkdirSync(conversations, { recursive: true });
 		for (const suffix of [".db", ".db-shm", ".db-wal", ".meta"]) fs.writeFileSync(path.join(conversations, userSid + suffix), "user");

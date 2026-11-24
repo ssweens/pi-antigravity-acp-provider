@@ -82,6 +82,7 @@ interface Binding {
 	initialize: InitializeResponse;
 	session: AcpNewSessionResponse;
 	mode: PermissionMode;
+	serverMode: string;
 	instructionsFingerprint: string | undefined;
 	needsReconstruction: boolean;
 	modelId: string;
@@ -420,6 +421,21 @@ export class AntigravityRuntime {
 		await this.closeBindings();
 		this.quotaCache = undefined;
 		this.sessionStore?.clear();
+		if (this.ensureAgent) {
+			try {
+				const connection = this.createConnection({ cwd: process.cwd() });
+				try {
+					const initialize = await connection.initialize();
+					if (initialize.agentCapabilities?.auth?.logout) {
+						await connection.logout();
+					}
+				} finally {
+					await connection.close();
+				}
+			} catch {
+				// Fall through to local credential cleanup if the server is unavailable.
+			}
+		}
 		clearAntigravityCredentials();
 	}
 
@@ -429,11 +445,23 @@ export class AntigravityRuntime {
 			this.permissionMode = mode;
 			await Promise.all([...this.resolvedBindings].map(async (binding) => {
 				if (binding.mode === mode && this.confirmedMode(binding) === mode) return;
+				const state = binding.connection.getSessionState(binding.session.sessionId);
+				const serverMode = resolveServerMode(state, mode);
+				// Toggling yolo on `agy acp` (which maps yolo -> auto + CLI
+				// --dangerously-skip-permissions) requires respawning the worker
+				// so the CLI permission flag stays in lockstep with the mode.
+				const needsYoloRespawn =
+					(binding.mode === "yolo" || mode === "yolo") &&
+					resolveServerMode(state, "yolo") !== "yolo";
 				// Never change policy under an executing turn or leave an unsupported session alive.
-				if (!binding.turnCompletion && supportsMode(binding.connection.getSessionState(binding.session.sessionId), mode)) {
+				if (!binding.turnCompletion && !needsYoloRespawn && serverMode) {
 					try {
-						await binding.connection.setMode(binding.session.sessionId, mode);
-						if (this.confirmedMode(binding) === mode) { binding.mode = mode; return; }
+						await binding.connection.setMode(binding.session.sessionId, serverMode);
+						if (sessionModes(binding.connection.getSessionState(binding.session.sessionId))?.currentModeId === serverMode) {
+							binding.mode = mode;
+							binding.serverMode = serverMode;
+							return;
+						}
 					} catch { /* Close below; the next turn must negotiate again. */ }
 				}
 				await this.invalidateBinding(binding);
@@ -878,6 +906,7 @@ export class AntigravityRuntime {
 		const sessionEpoch = this.sessionEpoch(key);
 		const connection = this.createConnection({
 			cwd,
+			dangerouslySkipPermissions: this.permissionMode === "yolo",
 			handlers: {
 				onUpdate: (notification) => this.consumeUpdate(binding, notification),
 				onPermission: (request) => this.requestPermission(binding, request),
@@ -927,12 +956,13 @@ export class AntigravityRuntime {
 			session ??= await connection.newSession(cwd, signal, mcpServers);
 			this.assertSessionEpoch(key, epoch, sessionEpoch);
 			const mode = this.permissionMode;
-			if (!supportsMode(session, mode)) {
+			const serverMode = resolveServerMode(session, mode);
+			if (!serverMode) {
 				if (piSessionId) this.sessionStore?.remove(piSessionId);
 				throw new AntigravityAcpError("protocol", `Antigravity ${restored ? "restored" : "new"} session did not advertise permission mode '${mode}'; refusing to prompt`);
 			}
-			if (sessionModes(session)?.currentModeId !== mode) await connection.setMode(session.sessionId, mode, signal);
-			if (sessionModes(connection.getSessionState(session.sessionId))?.currentModeId !== mode) {
+			if (sessionModes(session)?.currentModeId !== serverMode) await connection.setMode(session.sessionId, serverMode, signal);
+			if (sessionModes(connection.getSessionState(session.sessionId))?.currentModeId !== serverMode) {
 				throw new AntigravityAcpError("protocol", "Antigravity did not confirm the requested permission mode");
 			}
 			const currentModel = sessionModels(session)?.currentModelId;
@@ -946,6 +976,7 @@ export class AntigravityRuntime {
 				initialize,
 				session,
 				mode,
+				serverMode,
 				instructionsFingerprint: undefined,
 				needsReconstruction: false,
 				modelId: acpModelId,
@@ -1181,8 +1212,11 @@ export class AntigravityRuntime {
 		});
 	}
 
-	private confirmedMode(binding: Binding): string | undefined {
-		return sessionModes(binding.connection.getSessionState(binding.session.sessionId))?.currentModeId;
+	private confirmedMode(binding: Binding): PermissionMode | undefined {
+		const current = sessionModes(binding.connection.getSessionState(binding.session.sessionId))?.currentModeId;
+		if (!current) return undefined;
+		if (current === binding.serverMode) return binding.mode;
+		return normalizeServerMode(current);
 	}
 
 	private noteContinuationInstructions(binding: Binding, context: Context): void {
@@ -1284,8 +1318,25 @@ function hasUsableLocalAuth(health: AntigravityAuthHealth): boolean {
 	return health.status === "api-key-env" || health.status === "oauth-refreshable";
 }
 
-function supportsMode(session: SessionState, mode: PermissionMode): boolean {
-	return sessionModes(session)?.availableModes.some((candidate) => candidate.id === mode) === true;
+function resolveServerMode(session: SessionState, mode: PermissionMode): string | undefined {
+	const available = sessionModes(session)?.availableModes ?? [];
+	const candidates =
+		mode === "yolo"
+			? ["yolo", "auto"]
+			: mode === "auto_edit"
+				? ["auto_edit", "accept-edits"]
+				: ["default"];
+	for (const candidate of candidates) {
+		if (available.some((entry) => entry.id === candidate)) return candidate;
+	}
+	return undefined;
+}
+
+function normalizeServerMode(serverMode: string): PermissionMode | undefined {
+	if (serverMode === "default") return "default";
+	if (serverMode === "auto_edit" || serverMode === "accept-edits") return "auto_edit";
+	if (serverMode === "yolo" || serverMode === "auto") return "yolo";
+	return undefined;
 }
 
 function permissionView(permission: PendingPermission): PermissionView {

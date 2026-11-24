@@ -8,6 +8,7 @@ import {
 	inspectAntigravityAuth,
 	removeConversation,
 	resolveAntigravityAcpDirectory,
+	resolveAntigravityAcpLaunch,
 } from "../src/acp/antigravity.js";
 
 const roots: string[] = [];
@@ -45,7 +46,7 @@ describe("Antigravity auth health", () => {
 
 	it("follows an explicit GEMINI_HOME to the relocated token", () => {
 		const home = root();
-		const acp = path.join(home, "antigravity-acp");
+		const acp = path.join(home, "antigravity-cli");
 		fs.mkdirSync(acp, { recursive: true });
 		fs.writeFileSync(path.join(acp, "acp_token.json"), '{"refresh_token":"secret"}');
 		const previous = process.env.GEMINI_HOME;
@@ -64,7 +65,7 @@ describe("Antigravity auth health", () => {
 		process.env.GEMINI_HOME = "  ";
 		try {
 			expect(resolveAntigravityAcpDirectory()).toBe(
-				path.join(os.homedir(), ".gemini", "antigravity-acp"),
+				path.join(os.homedir(), ".gemini", "antigravity-cli"),
 			);
 		} finally {
 			if (previous === undefined) delete process.env.GEMINI_HOME;
@@ -74,11 +75,39 @@ describe("Antigravity auth health", () => {
 
 	it("resolves the store from the environment it is given", () => {
 		expect(resolveAntigravityAcpDirectory({ HOME: "/child/home" })).toBe(
-			path.join("/child/home", ".gemini", "antigravity-acp"),
+			path.join("/child/home", ".gemini", "antigravity-cli"),
 		);
 		expect(resolveAntigravityAcpDirectory({ HOME: "/child/home", GEMINI_HOME: "/child/workspace" })).toBe(
-			path.join("/child/workspace", "antigravity-acp"),
+			path.join("/child/workspace", "antigravity-cli"),
 		);
+	});
+
+	it("recognizes keychain credentials when no token file is present", () => {
+		const directory = root();
+		const health = inspectAntigravityAuth(directory, {}, () => true);
+		expect(health).toMatchObject({
+			status: "oauth-refreshable",
+			authType: "oauth-personal",
+			credentialStore: "keychain",
+		});
+	});
+
+	it("launches agy CLI with acp, process-per-session, and optional yolo skip-permissions", () => {
+		const dir = root();
+		const agy = path.join(dir, "agy");
+		fs.writeFileSync(agy, "binary", { mode: 0o755 });
+		expect(resolveAntigravityAcpLaunch({ env: { AGY_ACP_BIN: agy } })).toEqual({
+			command: agy,
+			args: ["acp", "--process-per-session", "--disable-telemetry"],
+			source: "env",
+			kind: "agy-cli",
+		});
+		expect(resolveAntigravityAcpLaunch({ env: { AGY_ACP_BIN: agy }, dangerouslySkipPermissions: true })).toEqual({
+			command: agy,
+			args: ["acp", "--process-per-session", "--disable-telemetry", "--dangerously-skip-permissions"],
+			source: "env",
+			kind: "agy-cli",
+		});
 	});
 
 	it("reads the API key from the inspected environment only", () => {

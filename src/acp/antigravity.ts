@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -8,36 +9,85 @@ export interface AntigravityLaunch {
 	command: string;
 	args: string[];
 	source: "env" | "user-bin" | "managed" | "path";
+	kind: "agy-cli" | "legacy-server";
 }
 
-export function resolveAntigravityAcpLaunch(): AntigravityLaunch {
-	const env = process.env.AGY_ACP_BIN?.trim();
+export interface AntigravityLaunchOptions {
+	dangerouslySkipPermissions?: boolean;
+	env?: NodeJS.ProcessEnv;
+}
+
+const KEYCHAIN_SERVICE = "gemini";
+const KEYCHAIN_ACCOUNT = "antigravity";
+const SECURITY_CLI = "/usr/bin/security";
+const VERSION_CACHE = new Map<string, string>();
+
+function buildAgyCliLaunch(
+	command: string,
+	source: AntigravityLaunch["source"],
+	options: AntigravityLaunchOptions,
+): AntigravityLaunch {
+	const args = ["acp", "--process-per-session", "--disable-telemetry"];
+	if (options.dangerouslySkipPermissions) args.push("--dangerously-skip-permissions");
+	return { command, args, source, kind: "agy-cli" };
+}
+
+function isLegacyServerCommand(command: string): boolean {
+	const base = path.basename(command).toLowerCase();
+	return base.startsWith("agy_acp_server");
+}
+
+export function resolveAntigravityAcpLaunch(options: AntigravityLaunchOptions = {}): AntigravityLaunch {
+	const procEnv = options.env ?? process.env;
+	const home = effectiveHome(procEnv);
+	const env = procEnv.AGY_ACP_BIN?.trim();
 	if (env) {
-		const command = expandHome(env);
-		if (executable(command)) return directOrWrapper(command, "env");
+		const command = expandHome(env, home);
+		if (executable(command)) {
+			if (isLegacyServerCommand(command) || isScriptWrapper(command)) {
+				return directOrWrapper(command, "env");
+			}
+			return buildAgyCliLaunch(command, "env", options);
+		}
 	}
 
-	// Prefer the provider's verified active release over ambient executables.
-	// AGY_ACP_BIN remains the explicit opt-out for user-managed installations.
-	const managedRoot = path.join(os.homedir(), ".local", "opt", "agy-acp", "current");
-	for (const name of ["agy_acp_server.par", "agy_acp_server.exe"]) {
-		const managed = path.join(managedRoot, name);
-		if (executable(managed)) return directOrWrapper(managed, "managed");
+	const agyNames = process.platform === "win32" ? ["agy.exe", "agy"] : ["agy"];
+	for (const name of agyNames) {
+		const userAgy = path.join(home, ".local", "bin", name);
+		if (executable(userAgy)) return buildAgyCliLaunch(userAgy, "user-bin", options);
 	}
 
-	const userBin = path.join(os.homedir(), ".local", "bin", "agy_acp_server.par");
-	if (executable(userBin)) return { command: userBin, args: [], source: "user-bin" };
-
-	for (const directory of (process.env.PATH ?? "").split(path.delimiter)) {
+	for (const directory of (procEnv.PATH ?? procEnv.Path ?? "").split(path.delimiter)) {
 		if (!directory) continue;
-		const candidate = path.join(directory, "agy_acp_server.par");
-		if (executable(candidate)) return directOrWrapper(candidate, "path");
+		for (const name of agyNames) {
+			const candidate = path.join(directory, name);
+			if (executable(candidate)) return buildAgyCliLaunch(candidate, "path", options);
+		}
 	}
 
 	throw new AntigravityAcpError(
 		"spawn",
-		"Google Antigravity ACP server is not installed. Install/enable agy ACP or set AGY_ACP_BIN.",
+		"Google Antigravity CLI (agy) is not installed. Install agy (https://antigravity.google/docs/install?tab=cli) or set AGY_ACP_BIN.",
 	);
+}
+
+/** Reads `agy --version` (cached per executable path). Never throws. */
+export function readAgyCliVersion(command: string): string | undefined {
+	const cached = VERSION_CACHE.get(command);
+	if (cached) return cached;
+	try {
+		const raw = execFileSync(command, ["--version"], {
+			encoding: "utf8",
+			timeout: 5_000,
+			stdio: ["ignore", "pipe", "ignore"],
+		}).trim();
+		const match = /\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?/u.exec(raw);
+		const version = match?.[0] ?? (raw || undefined);
+		if (version) VERSION_CACHE.set(command, version);
+		return version;
+	} catch {
+		return undefined;
+	}
 }
 
 export type AntigravityAuthStatus =
@@ -50,21 +100,46 @@ export type AntigravityAuthStatus =
 export interface AntigravityAuthHealth {
 	status: AntigravityAuthStatus;
 	authType?: string;
+	credentialStore?: "keychain" | "file";
 	tokenFile: boolean;
 	settingsFile: boolean;
 }
 
-/** Resolves `<home>/antigravity-acp` for the given environment: `<home>` is
- * `$GEMINI_HOME` when set and non-empty, otherwise `<HOME>/.gemini`. The server
- * relocates its whole tree -- including `acp_token.json` -- under an explicit
- * `GEMINI_HOME` (an embedding host may set it per workspace), and a child
- * process can run with a different `HOME`/`GEMINI_HOME` than the one that
- * spawned it, so credential inspection must pass the child's environment. */
+/** Resolves `<home>/antigravity-cli` for the given environment: `<home>` is
+ * `$GEMINI_HOME` when set and non-empty, otherwise `<HOME>/.gemini`. */
 export function resolveAntigravityAcpDirectory(env: NodeJS.ProcessEnv = process.env): string {
 	const home = effectiveHome(env);
 	const geminiHome = env.GEMINI_HOME?.trim();
 	const base = geminiHome ? expandHome(geminiHome, home) : path.join(home, ".gemini");
-	return path.join(base, "antigravity-acp");
+	return path.join(base, "antigravity-cli");
+}
+
+/** Checks macOS Keychain entry presence for `agy` CLI (`gemini`/`antigravity`).
+ * Calling `find-generic-password` without `-w`/`-g` checks metadata only and
+ * never triggers a Keychain access prompt. */
+export function hasAgyKeychainCredential(): boolean {
+	if (process.platform !== "darwin" || process.env.VITEST) return false;
+	try {
+		execFileSync(SECURITY_CLI, ["find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", KEYCHAIN_ACCOUNT], {
+			stdio: "ignore",
+			timeout: 3_000,
+		});
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+export function clearAgyKeychainCredentials(): void {
+	if (process.platform !== "darwin" || process.env.VITEST) return;
+	try {
+		execFileSync(SECURITY_CLI, ["delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", KEYCHAIN_ACCOUNT], {
+			stdio: "ignore",
+			timeout: 3_000,
+		});
+	} catch {
+		// Absent entry is already logged out.
+	}
 }
 
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
@@ -90,6 +165,7 @@ export function removeConversation(sessionId: string, directory = resolveAntigra
 export function inspectAntigravityAuth(
 	directory = resolveAntigravityAcpDirectory(),
 	env: NodeJS.ProcessEnv = process.env,
+	keychain: () => boolean = hasAgyKeychainCredential,
 ): AntigravityAuthHealth {
 	const tokenPath = path.join(directory, "acp_token.json");
 	const settingsPath = path.join(directory, "settings.json");
@@ -111,12 +187,27 @@ export function inspectAntigravityAuth(
 		try {
 			const token = JSON.parse(fs.readFileSync(tokenPath, "utf8")) as { refresh_token?: unknown };
 			if (typeof token.refresh_token === "string" && token.refresh_token.length > 0) {
-				return { status: "oauth-refreshable", authType: authType ?? "oauth-personal", tokenFile, settingsFile };
+				return {
+					status: "oauth-refreshable",
+					authType: authType ?? "oauth-personal",
+					credentialStore: "file",
+					tokenFile,
+					settingsFile,
+				};
 			}
 			return { status: "corrupt", ...(authType ? { authType } : {}), tokenFile, settingsFile };
 		} catch {
 			return { status: "corrupt", ...(authType ? { authType } : {}), tokenFile, settingsFile };
 		}
+	}
+	if (keychain()) {
+		return {
+			status: "oauth-refreshable",
+			authType: authType ?? "oauth-personal",
+			credentialStore: "keychain",
+			tokenFile,
+			settingsFile,
+		};
 	}
 	if (authType) return { status: "configured-not-authenticated", authType, tokenFile, settingsFile };
 	return { status: "missing", tokenFile, settingsFile };
@@ -127,11 +218,11 @@ export function hasAntigravityAuth(): boolean {
 	return status === "api-key-env" || status === "oauth-refreshable";
 }
 
-/** Local logout. Google currently advertises logout as an agent command rather
- * than an ACP SDK RPC, so this removes the local refresh token and auth choice. */
+/** Local logout fallback. Clears keychain entry (macOS) and local token/auth files. */
 export function clearAntigravityCredentials(
 	directory = resolveAntigravityAcpDirectory(),
 ): void {
+	clearAgyKeychainCredentials();
 	fs.rmSync(path.join(directory, "acp_token.json"), { force: true });
 	const settingsPath = path.join(directory, "settings.json");
 	try {
@@ -145,19 +236,23 @@ export function clearAntigravityCredentials(
 	}
 }
 
-function directOrWrapper(command: string, source: AntigravityLaunch["source"]): AntigravityLaunch {
+function isScriptWrapper(command: string): boolean {
 	try {
 		const fd = fs.openSync(command, "r");
 		const bytes = Buffer.alloc(64);
 		const count = fs.readSync(fd, bytes, 0, bytes.length, 0);
 		fs.closeSync(fd);
-		if (bytes.subarray(0, count).toString("utf8").startsWith("#!")) {
-			return { command, args: [], source };
-		}
+		return bytes.subarray(0, count).toString("utf8").startsWith("#!");
 	} catch {
-		// Native executable; use the server's required empty uid argument.
+		return false;
 	}
-	return { command, args: process.platform === "linux" ? ["--uid="] : [], source };
+}
+
+function directOrWrapper(command: string, source: AntigravityLaunch["source"]): AntigravityLaunch {
+	if (isScriptWrapper(command)) {
+		return { command, args: [], source, kind: "legacy-server" };
+	}
+	return { command, args: process.platform === "linux" ? ["--uid="] : [], source, kind: "legacy-server" };
 }
 
 function executable(file: string): boolean {

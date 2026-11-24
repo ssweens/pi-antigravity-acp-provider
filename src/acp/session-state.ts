@@ -6,7 +6,7 @@ import type {
 } from "@agentclientprotocol/sdk/unstable";
 import { z } from "zod";
 
-import { splitEffortSuffix } from "../models.js";
+import { effortFromName, splitEffortSuffix } from "../models.js";
 import { AntigravityAcpError } from "./errors.js";
 
 /** Antigravity's pre-config-option model metadata remains on older ACP v1 servers. */
@@ -75,6 +75,13 @@ export function splitSessionModelId(state: SessionState, modelId: string): { bas
 		const level = levels.find((option) => `${base.value}-${option.value}` === modelId);
 		if (level) return { base: base.value, effort: level.value };
 	}
+	// Switching from a family with fewer tiers (e.g. flash: low/medium/high) to
+	// a family with an extra tier (e.g. neon/hydrogen: xhigh) won't find `xhigh`
+	// in the *current* thought_level selector until after `model` changes.
+	const suffix = splitEffortSuffix(modelId);
+	if (suffix && models.some((option) => option.value === suffix.base)) {
+		return suffix;
+	}
 	return undefined;
 }
 
@@ -88,12 +95,6 @@ export function sessionModels(state: SessionState): { currentModelId: string; av
 		const qualified = (id: string) => splitEffortSuffix(id) !== undefined ||
 			thoughtOptions.some((option) => option.value.length > 0 && id.endsWith(`-${option.value}`));
 		if (thoughtOptions.length > 0 && modelOptions.some((option) => !qualified(option.value))) {
-			const currentModelId =
-				qualified(selector.currentValue) || !thoughtSelector.currentValue
-					? selector.currentValue
-					: `${selector.currentValue}-${thoughtSelector.currentValue}`;
-			// Live selectors are authoritative; retain legacy labels only for the
-			// same complete, duplicate-free inventory.
 			const synthesized = modelOptions.flatMap((modelOpt) =>
 				qualified(modelOpt.value)
 					? [{ modelId: modelOpt.value, name: modelOpt.name }]
@@ -102,14 +103,56 @@ export function sessionModels(state: SessionState): { currentModelId: string; av
 							name: `${modelOpt.name} (${thoughtOpt.name})`,
 						})),
 			);
-			const synthesizedIds = new Set(synthesized.map((m) => m.modelId));
 
+			// Live thought_level options only describe the *currently selected*
+			// family, whereas other families in `state.models.availableModels`
+			// may have extra tiers (e.g. xhigh), fewer tiers, or no thinking
+			// tiers at all (e.g. orchestrator models). Keep the exact per-variant
+			// inventory whenever it is duplicate-free, covers every live model
+			// option, and agrees with the active family's live thought_level set.
 			const legacy = state.models?.availableModels;
+			const exactOptions = new Set(modelOptions.filter((opt) => qualified(opt.value)).map((opt) => opt.value));
+			const familyOptions = modelOptions.filter((opt) => !qualified(opt.value));
+			const familyIds = new Set(familyOptions.map((opt) => opt.value));
+			const familyByName = new Map(familyOptions.map((opt) => [opt.name.trim().toLowerCase(), opt.value]));
+			const legacyFamilyOf = (candidate: AcpModelInfo): string | undefined => {
+				if (familyIds.has(candidate.modelId)) return candidate.modelId;
+				const split = splitEffortSuffix(candidate.modelId);
+				if (split && familyIds.has(split.base)) return split.base;
+				for (const opt of thoughtOptions) {
+					if (opt.value.length > 0 && candidate.modelId.endsWith(`-${opt.value}`)) {
+						const base = candidate.modelId.slice(0, -(opt.value.length + 1));
+						if (familyIds.has(base)) return base;
+					}
+				}
+				const named = effortFromName(candidate.name);
+				return named ? familyByName.get(named.baseName.toLowerCase()) : undefined;
+			};
+			const legacyIds = new Set(legacy?.map((model) => model.modelId));
+			const coveredFamilies = new Set<string>();
 			const isLegacyCompatible =
 				legacy !== undefined &&
-				legacy.length === synthesizedIds.size &&
-				new Set(legacy.map((model) => model.modelId)).size === synthesizedIds.size &&
-				legacy.every((m) => synthesizedIds.has(m.modelId));
+				legacy.length > 0 &&
+				legacyIds.size === legacy.length &&
+				legacy.every((m) => {
+					if (exactOptions.has(m.modelId)) return true;
+					const fam = legacyFamilyOf(m);
+					if (!fam) return false;
+					coveredFamilies.add(fam);
+					return true;
+				}) &&
+				[...exactOptions].every((id) => legacyIds.has(id)) &&
+				[...familyIds].every((id) => coveredFamilies.has(id)) &&
+				(!familyIds.has(selector.currentValue) ||
+					thoughtOptions.every((opt) => legacyIds.has(`${selector.currentValue}-${opt.value}`)) ||
+					legacy.filter((m) => legacyFamilyOf(m) === selector.currentValue).length === thoughtOptions.length);
+
+			const currentModelId =
+				qualified(selector.currentValue) ||
+				!thoughtSelector.currentValue ||
+				(isLegacyCompatible && legacyIds.has(selector.currentValue))
+					? selector.currentValue
+					: `${selector.currentValue}-${thoughtSelector.currentValue}`;
 
 			return {
 				currentModelId,

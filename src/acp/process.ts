@@ -20,6 +20,7 @@ export interface AntigravityProcessOptions {
 	command?: string;
 	args?: string[];
 	env?: NodeJS.ProcessEnv;
+	dangerouslySkipPermissions?: boolean;
 	/** Overrides the credential-storage resolution seams (keychain probe and
 	 * token path) in tests; production callers leave this unset. */
 	credentialStorage?: Omit<CredentialStorageOptions, "env">;
@@ -53,8 +54,10 @@ export function resolveNodeBinary(
 	const candidate = process.execPath;
 	const base = (candidate.split(/[\\/]/).pop() ?? "").toLowerCase();
 	// A standalone Pi binary is not a Node interpreter, but Node itself can be
-	// named nodejs (not just node), particularly in Nix environments.
-	if (/^node(?:js)?(?:\.exe|\.cmd|\.bat)?$/.test(base)) return candidate;
+	// named nodejs (not just node), particularly in Nix environments. Verify the
+	// running binary still exists on disk so an in-place Homebrew upgrade does
+	// not leave a stale Cellar path ahead of PATH's current `node` symlink.
+	if (/^node(?:js)?(?:\.exe|\.cmd|\.bat)?$/.test(base) && isExecutable(candidate)) return candidate;
 	for (const directory of (env.PATH ?? env.Path ?? "").split(path.delimiter)) {
 		// Only use absolute PATH entries: the supervisor may spawn with a
 		// different cwd than the caller used to resolve this executable.
@@ -135,14 +138,21 @@ export class AntigravityProcess {
 	constructor(options: AntigravityProcessOptions) {
 		let command: string;
 		let args: string[];
+		let isAgyCli = false;
 		if (options.command) {
 			command = options.command;
 			args = options.args ?? [];
 		} else {
 			const nodeBinary = resolveNodeBinary(options.env?.NODE, options.env ?? process.env);
 			const launch = options.entryPath
-				? { command: nodeBinary, args: [options.entryPath, ...(options.args ?? [])] }
-				: resolveAntigravityAcpLaunch();
+				? { command: nodeBinary, args: [options.entryPath, ...(options.args ?? [])], kind: "legacy-server" as const }
+				: resolveAntigravityAcpLaunch({
+						...(options.dangerouslySkipPermissions !== undefined
+							? { dangerouslySkipPermissions: options.dangerouslySkipPermissions }
+							: {}),
+						...(options.env !== undefined ? { env: options.env } : {}),
+					});
+			isAgyCli = launch.kind === "agy-cli";
 			command = nodeBinary;
 			args = [resolveSupervisorEntry(), "--command", launch.command, ...launch.args];
 		}
@@ -151,10 +161,10 @@ export class AntigravityProcess {
 			resolveExit = resolve;
 		});
 
-		const env = applyCredentialStorageEnvironment(
-			applyDefaultTlsEnvironment(applyAcpProxyEnvironment(options.env ?? process.env)),
-			options.credentialStorage ?? {},
-		);
+		const baseEnv = applyDefaultTlsEnvironment(applyAcpProxyEnvironment(options.env ?? process.env));
+		const env = isAgyCli && !options.credentialStorage
+			? baseEnv
+			: applyCredentialStorageEnvironment(baseEnv, options.credentialStorage ?? {});
 		const child = spawn(command, args, {
 			cwd: path.resolve(options.cwd),
 			env,

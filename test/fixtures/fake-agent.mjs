@@ -144,7 +144,7 @@ for await (const line of rl) {
 		}
 		// agy writes a conversation store per new session; opt-in, and only under an explicit GEMINI_HOME.
 		const conversations = process.env.FAKE_AGENT_CONVERSATIONS && process.env.GEMINI_HOME?.trim()
-			? path.join(process.env.GEMINI_HOME, "antigravity-acp", "conversations") : undefined;
+			? path.join(process.env.GEMINI_HOME, "antigravity-cli", "conversations") : undefined;
 		const sessionId = conversations && process.env.FAKE_AGENT_CONVERSATIONS === "uuid" ? randomUUID() : "fake-session";
 		if (conversations) {
 			fs.mkdirSync(conversations, { recursive: true });
